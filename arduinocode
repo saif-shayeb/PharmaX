@@ -1,0 +1,352 @@
+#define PUL1 2   // X Pulse
+#define DIR1 3   // X Direction
+  
+#define PUL2 4   // Y Pulse
+#define DIR2 5   // Y Direction
+#define PUL3 6   // Z Pulse
+#define DIR3 7   // Z Direction
+
+#define LIM1 8   // X limit switch
+#define LIM2 9   // Y limit switch
+#define LIM3 10  // Z limit switch
+#define ENA1 48  // X Enable
+#define ENA2 50  // Y Enable
+#define ENA3 52  // Z Enable
+
+// Add ultrasonic sensor pins
+#define TRIG_PIN_BACK 11     // Ultrasonic Trig pin
+#define ECHO_PIN_BACK 12     // Ultrasonic Echo pin
+#define BOX_DISTANCE 8.0 // Maximum distance to detect a box (in cm)
+#define TRIG_PIN_FRONT 28     // Ultrasonic Trig pin
+#define ECHO_PIN_FRONT 30 
+// Add ramp position
+#define RAMP_X 0.0      // X position for ramp
+#define RAMP_Y 35.0     // Y position for ramp  
+#define RAMP_Z 20.0     // Z position for ramp
+
+#define STEPS_PER_CM 125.0
+#define MAX_X_CM 40.0
+#define MAX_Y_CM 40.0
+#define MAX_Z_CM 40.0
+#define delayFast 300
+#define delaySlow 400
+#define homeDelay 400
+#include <Servo.h>
+
+struct Shelf {
+  float xposcm;
+  float yposcm;
+  float zposcm;
+};
+bool medret;
+Shelf shelves[3][4] = {
+  {{36, 0,6}, {29.4, 0,6}, {23, 0,6}, {17, 1,6}},
+  {{35.8, 17.70,5}, {29.3, 17.70,5}, {23.4, 17.70,5}, {17.0, 17.70,5}},
+  {{35.95, 35.4,4.5}, {29.9, 35.4,4.5}, {23.3, 35.4,4.5}, {17.3, 35.4,4.5}}
+};
+
+Servo myServo;
+unsigned long homeTime = 0;   // global variable
+bool driversEnabled = true;
+
+float posX = 0.0, posY = 0.0, posZ = 0.0;
+bool isHomed = false;
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(PUL1, OUTPUT);
+  pinMode(DIR1, OUTPUT);
+  pinMode(ENA1, OUTPUT);
+  pinMode(PUL2, OUTPUT);
+  pinMode(DIR2, OUTPUT);
+  pinMode(PUL3, OUTPUT);
+  pinMode(DIR3, OUTPUT);
+
+  pinMode(LIM1, INPUT_PULLUP);
+  pinMode(LIM2, INPUT_PULLUP);
+  pinMode(LIM3, INPUT_PULLUP);
+  pinMode(ENA2, OUTPUT);
+  pinMode(ENA3, OUTPUT);
+
+  // Initialize ultrasonic sensor
+  pinMode(TRIG_PIN_BACK, OUTPUT);
+  pinMode(ECHO_PIN_BACK, INPUT);
+  pinMode(TRIG_PIN_FRONT, OUTPUT);
+  pinMode(ECHO_PIN_FRONT, INPUT);
+
+  digitalWrite(ENA1, LOW);
+  digitalWrite(ENA2, LOW);
+  digitalWrite(ENA3, LOW);
+  
+  myServo.attach(46); 
+  myServo.write(60);  
+  homeAllAxes();
+  Serial.println("ARDUINO_READY");
+}
+
+// Add function to read ultrasonic distance
+float readUltrasonicDistance(int TRIG_PIN,int ECHO_PIN) {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  
+  long duration = pulseIn(ECHO_PIN, HIGH);
+  float distance = duration * 0.034 / 2; // Convert to cm
+  
+  return distance;
+}
+
+// Add function to check if box is present
+bool isBoxPresent(int TRIG_PIN,int ECHO_PIN) {
+  float distance = readUltrasonicDistance(TRIG_PIN, ECHO_PIN);
+  Serial.print("Ultrasonic distance: ");
+  Serial.println(distance);
+  
+  // If distance is less than BOX_DISTANCE, box is present
+  return (distance <= BOX_DISTANCE && distance > 0.5); // Also filter out very small values (noise)
+}
+
+void loop() {
+  if (isHomed && driversEnabled && (millis() - homeTime > 5000)) {
+    disableDrivers();
+  }
+
+  if (Serial.available()) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+     
+
+    if (command == "HOME") {
+      homeAllAxes();
+      Serial.println("ACK:HOME");
+    } 
+    else if (command.startsWith("S")) {
+      int dashPos = command.indexOf('-');
+      int trialnum=0;
+      if (dashPos != -1) {
+        int xShelf = command.substring(1, dashPos).toInt();
+        int yShelf = command.substring(dashPos + 1).toInt();
+        
+        if (xShelf >= 0 && xShelf < 3 && yShelf >= 0 && yShelf < 4) {
+          float xVal = shelves[xShelf][yShelf].xposcm-0.2;
+          float yVal = shelves[xShelf][yShelf].yposcm;
+          float zVal = shelves[xShelf][yShelf].zposcm+0.4;
+          retry:
+          // Retrieval sequence - MODIFIED WITH BOX VERIFICATION
+           moveTo(0.0, 0.0, 23.0);
+          if(xShelf != 2){
+         
+          moveTo(xVal, yVal, 23.0);
+          moveTo(xVal, yVal+8, 23.0);
+          delay(700);
+          if (!isBoxPresent(TRIG_PIN_FRONT,ECHO_PIN_FRONT)) {
+            Serial.println("ERROR:MED_NOT_ON_AVAILBLE");
+            homeAllAxes();              
+            return;                          
+          } 
+          }
+          
+            
+          moveTo(xVal, yVal , 23.0);         
+          moveTo(xVal, yVal , zVal+1.3);   
+          moveTo(xVal, yVal + 2.7, 23.0);
+          // التحقق إذا العلبة نزلت على المنصة
+            // نعطي وقت للعلبة تستقر
+
+          if (!isBoxPresent(TRIG_PIN_BACK, ECHO_PIN_BACK)&&trialnum<4) {
+            Serial.println("ERROR:BOX_NOT_ON_PLATFORM");
+            trialnum++;
+            if(trialnum == 3){
+              medret = false;
+              goto home;}
+            goto retry;
+                               
+                                     
+          }
+
+          medret = true;
+
+
+          // إذا في علبة على المنصة، يكمل للرامب
+          Serial.println("BOX_ON_PLATFORM_CONFIRMED");
+        
+          moveTo(xVal, yVal + 1.7, 21.0);
+          dispense(); 
+          home:                     
+          homeAllAxes();
+          if(medret){
+          Serial.println("ACK:S" + String(xShelf) + "-" + String(yShelf));
+          Serial.println("MEDICINE_RETRIEVED:" + String(xShelf) + "-" + String(yShelf));}
+          else{
+             Serial.println("ERROR:FAILED_TO RETRIVE");
+
+          }
+        }
+      }
+    }
+    else if (command.startsWith("X")) {
+      float xVal = getAxisValue(command, 'X', posX);
+      float yVal = getAxisValue(command, 'Y', posY);
+      float zVal = getAxisValue(command, 'Z', posZ);
+
+      xVal = constrain(xVal, 0.0, MAX_X_CM);
+      yVal = constrain(yVal, 0.0, MAX_Y_CM);
+      zVal = constrain(zVal, 0.0, MAX_Z_CM);
+
+      Serial.print("Moving to X: ");
+      Serial.print(xVal);
+      Serial.print(" Y: ");
+      Serial.print(yVal);
+      Serial.print(" Z: ");
+      Serial.println(zVal);
+      moveTo(0.0, 0.0, 20.0);
+      moveTo(xVal, yVal, zVal);
+    }
+    // Add command to check ultrasonic sensor manually
+  
+  }
+}
+
+void homeAllAxes() {
+  if(digitalRead(LIM2)){
+  float distFromShelf = readUltrasonicDistance(TRIG_PIN_FRONT, ECHO_PIN_FRONT);
+  if(distFromShelf<20){
+    posZ=distFromShelf+2;
+     moveTo(posX, posY, 20.0);
+  }}
+  digitalWrite(ENA1, LOW);  // enable drivers
+  driversEnabled = true;
+
+  // --- Home X ---
+  digitalWrite(DIR1, HIGH);
+  while (!digitalRead(LIM1)) pulse(PUL1, homeDelay);
+  posX = 0.0;
+
+  // --- Home Y ---
+  digitalWrite(ENA2, LOW);  // enable drivers
+  digitalWrite(DIR2, HIGH);
+  while (!digitalRead(LIM2)) pulse(PUL2, homeDelay);
+  posY = 0.0;
+
+  // --- Home Z ---
+  digitalWrite(ENA3, LOW);  // enable drivers
+  digitalWrite(DIR3, HIGH);
+  while (!digitalRead(LIM3)) pulse(PUL3, homeDelay);
+  posZ = 0.0;
+
+  isHomed = true;
+  homeTime = millis();   // start timer after homing
+}
+
+void dispense() {
+  moveTo(RAMP_X, RAMP_Y, RAMP_Z);
+   // يتحرك لموقع الرامب أولاً
+  myServo.write(20);                // يدفع العلبة
+  delay(500);
+  myServo.write(60);               // يرجع السيرفو
+  delay(500);
+}
+
+void moveTo(float targetX, float targetY, float targetZ) {
+  if (!driversEnabled) {
+    enableDrivers();
+    delay(50);  // small delay to let driver power up
+  }
+  
+  if (targetX != posX) digitalWrite(ENA1, LOW);
+  moveAxis(PUL1, DIR1, posX, targetX, &posX, LOW, delayFast);
+  moveAxis(PUL2, DIR2, posY, targetY, &posY, LOW, delayFast);
+  
+  if (targetZ != posZ) digitalWrite(ENA1, HIGH);
+  moveAxis(PUL3, DIR3, posZ, targetZ, &posZ, LOW, delaySlow);
+  if (targetX != posX) digitalWrite(ENA1, LOW);
+  homeTime = millis();
+}
+
+float getAxisValue(String cmd, char axis, float defaultValue) {
+  int pos = cmd.indexOf(axis);
+  if (pos == -1) return defaultValue;
+
+  int next = cmd.length();
+  char axes[] = {'X', 'Y', 'Z'};
+  for (int i = 0; i < 3; i++) {
+    if (axes[i] != axis) {
+      int temp = cmd.indexOf(axes[i], pos + 1);
+      if (temp != -1 && temp < next) next = temp;
+    }
+  }
+
+  String valueStr = cmd.substring(pos + 1, next);
+  if (valueStr.length() == 0) return defaultValue;
+  
+  return valueStr.toFloat();
+}
+
+void moveAxis(int pul, int dir, float current, float target, float* pos, bool forwardDir, int baseDelay) {
+  float delta = target - current;
+  if (delta == 0.0) return;
+
+  int totalSteps = round(abs(delta) * STEPS_PER_CM);
+  if (totalSteps == 0) return;  // No movement needed
+
+  digitalWrite(dir, delta > 0 ? forwardDir : !forwardDir);
+
+  // Speed profile parameters
+  int accelSteps = totalSteps / 10;   // accelerate 10%
+  int decelSteps = totalSteps / 10;   // decelerate 10%
+  int cruiseSteps = totalSteps - accelSteps - decelSteps;
+  if (cruiseSteps < 0) cruiseSteps = 0;
+
+  int delayStart = baseDelay * 3;   // slow start (e.g. 3x base)
+  int delayMin   = baseDelay;       // max speed (min delay)
+
+  // Calculate step increment per pulse
+  float stepIncrement = (delta > 0 ? 1.0 : -1.0) / STEPS_PER_CM;
+
+  // --- Acceleration phase ---
+  for (int i = 0; i < accelSteps; i++) {
+    int d = map(i, 0, accelSteps, delayStart, delayMin);
+    pulse(pul, d);
+    *pos += stepIncrement;
+  }
+
+  // --- Cruise phase ---
+  for (int i = 0; i < cruiseSteps; i++) {
+    pulse(pul, delayMin);
+    *pos += stepIncrement;
+  }
+
+  // --- Deceleration phase ---
+  for (int i = 0; i < decelSteps; i++) {
+    int d = map(i, 0, decelSteps, delayMin, delayStart);
+    pulse(pul, d);
+    *pos += stepIncrement;
+  }
+
+  // Ensure final position is exactly the target
+  *pos = target;
+}
+
+void pulse(int pin, int d) {
+  digitalWrite(pin, HIGH);
+  delayMicroseconds(d);
+  digitalWrite(pin, LOW);
+  delayMicroseconds(d);
+}
+
+void disableDrivers() {
+  digitalWrite(ENA1, HIGH);   // disable (active LOW)
+  digitalWrite(ENA2, HIGH);
+  digitalWrite(ENA3, HIGH);
+  driversEnabled = false;
+}
+
+void enableDrivers() {
+  digitalWrite(ENA1, LOW);   // enable
+  digitalWrite(ENA2, LOW);
+  digitalWrite(ENA3, LOW);
+  driversEnabled = true;
+}
